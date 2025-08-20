@@ -69,6 +69,8 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [s3Client, setS3Client] = useState<S3Client | null>(null)
+  const [downloadingFiles, setDownloadingFiles] = useState<Set<string>>(new Set())
+  const [downloadProgress, setDownloadProgress] = useState<Map<string, number>>(new Map())
 
   // Initialize S3 client
   useEffect(() => {
@@ -205,9 +207,105 @@ console.log('🔧 Initializing S3 client...')
   }
 
   const handleDownload = async (key: string) => {
-    const url = await generateDownloadUrl(key)
-    if (url !== '#') {
-      window.open(url, '_blank')
+    if (downloadingFiles.has(key)) {
+      console.log('Download already in progress for:', key)
+      return
+    }
+    
+    try {
+      console.log(`🔽 Starting download for: ${key}`)
+      
+      // Add to downloading set and initialize progress
+      setDownloadingFiles(prev => new Set([...prev, key]))
+      setDownloadProgress(prev => new Map([...prev, [key, 0]]))
+      
+      const url = await generateDownloadUrl(key)
+      if (url === '#') {
+        console.error('Failed to generate download URL')
+        return
+      }
+
+      console.log('📋 Generated signed URL, initiating download...')
+      
+      // Fetch with progress tracking
+      const response = await fetch(url)
+      
+      if (!response.ok) {
+        throw new Error(`Download failed: ${response.status} ${response.statusText}`)
+      }
+      
+      const contentLength = response.headers.get('content-length')
+      const total = contentLength ? parseInt(contentLength, 10) : 0
+      
+      if (response.body && total > 0) {
+        // Stream with progress tracking
+        const reader = response.body.getReader()
+        const chunks: Uint8Array[] = []
+        let loaded = 0
+        
+        while (true) {
+          const { done, value } = await reader.read()
+          
+          if (done) break
+          
+          chunks.push(value)
+          loaded += value.length
+          
+          // Update progress
+          const progress = Math.round((loaded / total) * 100)
+          setDownloadProgress(prev => new Map([...prev, [key, progress]]))
+        }
+        
+        // Create blob from chunks
+        const blob = new Blob(chunks)
+        
+        // Create object URL for the blob
+        const blobUrl = window.URL.createObjectURL(blob)
+        
+        // Create download link
+        const link = document.createElement('a')
+        link.href = blobUrl
+        link.download = key // Use the original filename
+        
+        // Add to document, click, and cleanup
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        
+        // Clean up the object URL
+        window.URL.revokeObjectURL(blobUrl)
+      } else {
+        // Fallback for when we can't track progress
+        const blob = await response.blob()
+        const blobUrl = window.URL.createObjectURL(blob)
+        
+        const link = document.createElement('a')
+        link.href = blobUrl
+        link.download = key
+        
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        
+        window.URL.revokeObjectURL(blobUrl)
+      }
+      
+      console.log(`✅ Download completed for: ${key}`)
+    } catch (error) {
+      console.error('❌ Download failed:', error)
+      alert(`Download failed for ${key}. Please try again.`)
+    } finally {
+      // Remove from downloading set and clear progress
+      setDownloadingFiles(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(key)
+        return newSet
+      })
+      setDownloadProgress(prev => {
+        const newMap = new Map(prev)
+        newMap.delete(key)
+        return newMap
+      })
     }
   }
 
@@ -283,12 +381,26 @@ console.log('🔧 Initializing S3 client...')
                       <td>{formatFileSize(file.Size)}</td>
                       <td>{formatDate(file.LastModified)}</td>
                       <td>
-                        <button 
-                          onClick={() => file.Key && handleDownload(file.Key)}
-                          className="download-btn"
-                        >
-                          Download
-                        </button>
+                        <div className="download-container">
+                          <button 
+                            onClick={() => file.Key && handleDownload(file.Key)}
+                            disabled={downloadingFiles.has(file.Key || '')}
+                            className={`download-btn ${downloadingFiles.has(file.Key || '') ? 'downloading' : ''}`}
+                          >
+                            {downloadingFiles.has(file.Key || '') 
+                              ? `${downloadProgress.get(file.Key || '') || 0}%`
+                              : 'Download'
+                            }
+                          </button>
+                          {downloadingFiles.has(file.Key || '') && (
+                            <div className="progress-bar">
+                              <div 
+                                className="progress-fill" 
+                                style={{ width: `${downloadProgress.get(file.Key || '') || 0}%` }}
+                              ></div>
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
